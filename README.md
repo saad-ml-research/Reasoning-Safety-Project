@@ -30,7 +30,7 @@ Each experiment consists of the following steps:
 
 ### 🎯 Safety Alignment Fine-tuning
 
-Training is performed with `train.py`. Intermediate Hugging Face `checkpoint-*` saves are **disabled** (`save_strategy="no"`); after training, the **final** adapter or model is written to `./finetuned_models/<model>/<run_name>/` via `trainer.save_model`.
+Training is performed with `train.py`. By default, intermediate Hugging Face `checkpoint-*` saves are **off** (`--save_strategy no`). Pass `--save_strategy epoch` (or `steps`) to keep per-epoch checkpoints under the same run directory. After training, the **final** adapter or model is also written to `./finetuned_models/<model>/<run_name>/` via `trainer.save_model`.
 
 #### Full-model finetuning
 ##### Standard
@@ -91,15 +91,21 @@ model_name="deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"
 per_device_bs=2
 mode="lora_up_proj_only_from16_to31_r1"
 epochs=10
+save_strategy="epoch"
 
-CUDA_VISIBLE_DEVICES=0,1,2,3 python train.py --per_device_bs $per_device_bs --model_name $model_name --mode $mode --epochs $epochs
+CUDA_VISIBLE_DEVICES=0,1,2,3 python train.py \
+    --per_device_bs $per_device_bs \
+    --model_name $model_name \
+    --mode $mode \
+    --epochs $epochs \
+    --save_strategy $save_strategy
 ```
 
 After training, LoRA weights live directly under the run directory, for example:
 
 `./finetuned_models/deepseek-ai_DeepSeek-R1-Distill-Qwen-14B/lora_up_proj_only_from16_to31_r1_epochs_10/`
 
-Use that path as `--lora_path` for sampling and safety evaluation (not a `checkpoint-*` subfolder).
+Use that path as `--lora_path` for sampling and safety evaluation. If you used `--save_strategy epoch`, per-epoch checkpoints appear as `checkpoint-*` subfolders; the merged final adapter for evaluation is still the top-level run directory from `trainer.save_model`.
 
 ### 🛡️ Safety Evaluation
 

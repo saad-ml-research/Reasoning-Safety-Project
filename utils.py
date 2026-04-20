@@ -139,7 +139,8 @@ def lora_merge(base_model_path, lora_model_path):
     model = AutoModelForCausalLM.from_pretrained(base_model_path, torch_dtype="auto", device_map="cpu")
 
     # Load and apply the LoRA adapter
-    model = PeftModel.from_pretrained(model, lora_model_path)
+    # Force adapter weights to load on CPU to avoid touching CUDA during merge.
+    model = PeftModel.from_pretrained(model, lora_model_path, device_map="cpu")
 
     # Merge LoRA weights into the base model
     model = model.merge_and_unload()
@@ -154,7 +155,9 @@ def lora_merge_and_load_vllm(base_model_path, lora_model_path, tensor_parallel_s
     try:
         # Load and merge model
         model = AutoModelForCausalLM.from_pretrained(base_model_path, torch_dtype="auto", device_map="cpu")
-        model = PeftModel.from_pretrained(model, lora_model_path)
+        # Force adapter weights to load on CPU to avoid CUDA device contention
+        # (common on shared JupyterHub setups where stray processes can hold GPUs).
+        model = PeftModel.from_pretrained(model, lora_model_path, device_map="cpu")
         model = model.merge_and_unload()
 
         # Save to temp directory
