@@ -26,11 +26,11 @@ The minimal required packages are listed in `environment.yml`. You can run `cond
 Each experiment consists of the following steps:
 1. Perform safety alignment fine-tuning using either full-model fine-tuning or LoRA.  
 2. Evaluate the safety of the fine-tuned models and the base model.  
-3. Evaluate the reasoning performance of the fine-tuned models and the base model.
+3. (Optional) Evaluate reasoning with the [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness) installed separately via pip, then use the helper scripts in this repo for second-stage scoring.
 
 ### 🎯 Safety Alignment Fine-tuning
 
-Training is performed with `train.py`. All checkpoints and the final model will be saved in the `./finetuned_models` folder.
+Training is performed with `train.py`. Intermediate Hugging Face `checkpoint-*` saves are **disabled** (`save_strategy="no"`); after training, the **final** adapter or model is written to `./finetuned_models/<model>/<run_name>/` via `trainer.save_model`.
 
 #### Full-model finetuning
 ##### Standard
@@ -40,12 +40,10 @@ Here is an example:
 ```bash
 model_name="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
 mode="full"
-save_strategy="epoch"
 per_device_bs=2
 epochs=5
 
 CUDA_VISIBLE_DEVICES=0,1,2,3 python train.py \
-    --save_strategy $save_strategy \
     --per_device_bs $per_device_bs \
     --model_name $model_name \
     --epochs $epochs \
@@ -63,7 +61,6 @@ model_name="deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
 mode="full"
 epochs=1
 per_device_bs=1
-save_strategy="no"
 
 CUDA_VISIBLE_DEVICES=0,1 deepspeed \
     train.py \
@@ -71,7 +68,6 @@ CUDA_VISIBLE_DEVICES=0,1 deepspeed \
     --model_name "$model_name" \
     --epochs "$epochs" \
     --mode "$mode" \
-    --save_strategy $save_strategy \
     --per_device_bs $per_device_bs \
     --shard
 ```
@@ -89,15 +85,21 @@ Here are a few options:
 - You can also find other variations in the definition of `parse_config_string()` in `train.py`, which includes several LoRA regularization methods that we explored.
 
 Below is an example of applying LoRA only to the up-projection layers with layer indices from 16 to 31, with r=1.
+
 ```bash
 model_name="deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"
-save_strategy="epoch"
 per_device_bs=2
 mode="lora_up_proj_only_from16_to31_r1"
 epochs=10
 
-CUDA_VISIBLE_DEVICES=0,1,2,3 python train.py --per_device_bs $per_device_bs --model_name $model_name --mode $mode --epochs $epochs --save_strategy $save_strategy
+CUDA_VISIBLE_DEVICES=0,1,2,3 python train.py --per_device_bs $per_device_bs --model_name $model_name --mode $mode --epochs $epochs
 ```
+
+After training, LoRA weights live directly under the run directory, for example:
+
+`./finetuned_models/deepseek-ai_DeepSeek-R1-Distill-Qwen-14B/lora_up_proj_only_from16_to31_r1_epochs_10/`
+
+Use that path as `--lora_path` for sampling and safety evaluation (not a `checkpoint-*` subfolder).
 
 ### 🛡️ Safety Evaluation
 
@@ -108,131 +110,67 @@ The first step is to sample responses from the model and save them using `sample
 For a **LoRA model**, you need to provide both:
 - the path to the saved PEFT LoRA weights via `--lora_path`, and  
 - the base model path via `--model_path`.
-The responses will be saved in `strongreject_responses.json` under the directroy of `--lora_path`. 
+Use `--dataset_name` to pick the harmful-prompt benchmark (outputs are named per benchmark so you can keep both runs in the same folder):
 
-The responses will be saved in `strongreject_responses.json` under the directory specified by `--lora_path`.
+- **`walledai/StrongREJECT`** or **`strongreject`**: shorter, more direct harmful prompts → `strongreject_responses.json`
+- **`harmbench`** or **`walledai/HarmBench`**: gated HarmBench prompts on the Hub ([`walledai/HarmBench`](https://huggingface.co/datasets/walledai/HarmBench)) — run `hf auth login` (or set `HF_TOKEN`) and accept the dataset access terms on the website. Subsets: **`standard`** (default), **`contextual`** (context + prompt), **`copyright`** — pass `--harmbench_config`. Outputs are named per subset, e.g. `harmbench_standard_responses.json`. Split defaults to **`train`** (`--harmbench_split`).
 
+For a **LoRA model**, responses are written next to `--lora_path` as above.
 
-For a **non-LoRA model** (e.g., a full-model fine-tuned model or the base model itself), you only need to specify `--model_path`. The responses will be saved in `strongreject_responses.json` under the directory specified by `--model_path`.
+For a **non-LoRA model** (e.g., a full-model fine-tuned model or the base model itself), you only need to specify `--model_path`. The responses file is written under that path (or under `./finetuned_models/.../base` when sampling the raw base model by short name), using the same filenames as for LoRA.
 
-Below is an example of evaluating all checkpoints for a LoRA model that was trained for 10 epochs:
+Example for a single finished LoRA run:
 
 ```bash
 dataset_name="walledai/StrongREJECT"
 size="14B"
 model_path="deepseek-ai/DeepSeek-R1-Distill-Qwen-$size"
-lora_name="lora_up_proj_only_from16_to31_r1_epochs_10"
+lora_path="./finetuned_models/deepseek-ai_DeepSeek-R1-Distill-Qwen-$size/lora_up_proj_only_from16_to31_r1_epochs_10"
 batch_size=4
 
-for ckpt_id in {500..5000..500}; do
-  echo "Running for checkpoint $ckpt_id"
-  lora_path="./finetuned_models/deepseek-ai_DeepSeek-R1-Distill-Qwen-$size/$lora_name/checkpoint-$ckpt_id"
-  CUDA_VISIBLE_DEVICES=0,1 python sample_responses.py \
-      --lora_path $lora_path \
-      --model_path $model_path \
-      --dataset_name $dataset_name \
-      --batch_size $batch_size
-done
+CUDA_VISIBLE_DEVICES=0,1 python sample_responses.py \
+    --lora_path $lora_path \
+    --model_path $model_path \
+    --dataset_name $dataset_name \
+    --batch_size $batch_size
 ```
 
 #### 2. Evaluating Responses
 
 The second step is to use `evaluate_safety.py` to evaluate the sampled responses using a safety evaluator (here, `meta-llama/Llama-Guard-3-8B`).  
-The evaluation results will be saved in `strongreject_responses_safety_eval.json` in the same folder as the response file.
-
-Below is an example continuing from the previous step, evaluating the responses sampled for each checkpoint:
+The evaluation results are saved next to the response file, with `_safety_eval.json` appended to the stem (for example `strongreject_responses_safety_eval.json` or `harmbench_standard_responses_safety_eval.json`).
 
 ```bash
 dataset_name="walledai/StrongREJECT"
 size="14B"
-model_path="deepseek-ai/DeepSeek-R1-Distill-Qwen-$size"
-lora_name="lora_up_proj_only_from16_to31_r1_epochs_10"
+lora_path="./finetuned_models/deepseek-ai_DeepSeek-R1-Distill-Qwen-$size/lora_up_proj_only_from16_to31_r1_epochs_10"
+response_file="${lora_path}/strongreject_responses.json"
 batch_size=4
 
-for ckpt_id in {500..5000..500}; do
-  echo "Running safety evaluation for checkpoint $ckpt_id"
-  lora_path="./finetuned_models/deepseek-ai_DeepSeek-R1-Distill-Qwen-$size/$lora_name/checkpoint-$ckpt_id"
-  response_file="${lora_path}/strongreject_responses.json"
-  CUDA_VISIBLE_DEVICES=0,1 python evaluate_safety.py \
-      --response_file $response_file \
-      --batch_size $batch_size
-done
+CUDA_VISIBLE_DEVICES=0,1 python evaluate_safety.py \
+    --response_file $response_file \
+    --batch_size $batch_size
 ```
 
-### 🧠 Reasoning Evaluation
+### 🧠 Reasoning Evaluation (optional, external harness)
 
-#### 1. Math and science benchmarks
+Reasoning benchmarks in the paper used [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness) as a **separate** install (for example `pip install lm-eval`), not as a copy inside this repository.
 
-We adapted the evaluation code from [Small-Model-Learnability-Gap](https://github.com/Small-Model-Gap/Small-Model-Learnability-Gap), which builds upon [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness).
-First, navigate to the `./lm-evaluation-harness` folder.  
-Then, follow the three steps below:
+Workflow:
 
-1. **[Only needed for LoRA models]**  
-   Use `lora_conversion.py` to merge the PEFT LoRA adapter weights with the base model, creating a standard merged model.  
-   You can also use this script later to delete the merged model when it’s no longer needed.
+1. **[LoRA only]** From this repo root, merge adapters into a full model:
+   `python lora_conversion.py --base_model_path <base> --lora_model_path <run_dir>`
+   This writes `<run_dir>_merged` next to the adapter folder. Use `--delete` with the same paths to remove the merged folder when done.
 
-2. **Sample responses with `lm_eval`**  
-   Use the `lm_eval` CLI to sample and evaluate responses from your model —  
-   either the merged model (for LoRA), a saved full-model fine-tuned checkpoint, or the base model itself.
+2. Run `lm_eval` (from your installed package) on the merged model, full fine-tune, or base model, with `--log_samples` and an `--output_path` of your choice.
 
-3. **Evaluate the responses**  
-   Since the simple rule-based evaluation in `lm_eval` can misjudge some cases, we perform a second-stage evaluation:  
-   - For **GPQA**, use `mcq_metric_gpqa.py`, which applies a more comprehensive rule-based matching we defined that handles many edge cases.  
-   - For **AIME**, use `math_metric_llm_eval_general.py`. This follows the method from [Small-Model-Learnability-Gap](https://github.com/Small-Model-Gap/Small-Model-Learnability-Gap), which leverages `Qwen2.5-32B-Instruct` to compare model responses with the ground-truth answers.
+3. Post-process outputs in that directory:
+   - **GPQA**: `python mcq_metric_gpqa.py --directory_path <lm_eval_output_subdir> --task <task_name>`
+   - **AIME**: `python math_metric_llm_eval_general.py --tensor_parallel_size <n> --directory_path <lm_eval_output_subdir> --task <task_name>`
 
-Below is an example for evaluating checkpoints of a LoRA fine-tuned model across random seeds on **GPQA** and **AIME**.  
-You may want to modify `output_path` depending on how you prefer to organize the results.
+The GPQA/AIME helpers were adapted from [Small-Model-Learnability-Gap](https://github.com/Small-Model-Gap/Small-Model-Learnability-Gap).
 
-
-```bash
-gpus="0,1,2,3"
-num_gpus=$(echo $gpus | awk -F',' '{print NF}')
-model="deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"
-batch_size="auto"
-max_model_tokens=32768
-max_gen_tokens=32768
-model_args="tensor_parallel_size=1,data_parallel_size=$num_gpus,gpu_memory_utilization=0.97,max_model_len=$max_model_tokens"
-
-lora_name="lora_up_proj_only_from16_to31_r1_epochs_10" 
-list_seed=(0 1 2 3 4 5 6 7)
-tasks=("gpqa_diamond_better_prompt" "AIME")
-
-for ckpt_id in {500..5000..500} do
-    lora_path="../finetuned_models/deepseek-ai_DeepSeek-R1-Distill-Qwen-14B/$lora_name/checkpoint-$ckpt_id"
-    merged_path="../finetuned_models/deepseek-ai_DeepSeek-R1-Distill-Qwen-14B/$lora_name/checkpoint-$ckpt_id"_merged
-    CUDA_VISIBLE_DEVICES=$gpus python lora_conversion.py --base_model_path $model --lora_model_path $lora_path
-    echo $merged_path
-    for seed in "${list_seed[@]}"; do
-        for task in "${tasks[@]}"; do
-            output_path="results/seed_$seed/$task/$lora_name/checkpoint-$ckpt_id"
-            CUDA_VISIBLE_DEVICES=$gpus lm_eval --model vllm \
-                --model_args pretrained="$merged_path",$model_args \
-                --gen_kwargs do_sample=true,temperature=0.6,top_p=0.95,max_gen_toks=$max_gen_tokens,seed=$seed \
-                --tasks "$task" \
-                --batch_size "$batch_size" \
-                --log_samples \
-                --trust_remote_code \
-                --output_path "$output_path" \
-                --apply_chat_template \
-                --seed $seed
-            
-            SANTIZED_MODEL_SAVE_LABEL=$(echo ${merged_path} | sed 's/\//__/g')
-            echo ${SANTIZED_MODEL_SAVE_LABEL}
-            if [ "$task" == "gpqa_diamond_better_prompt" ]; then
-                echo "Running rule-based matching"
-                python mcq_metric_gpqa.py --directory_path ${output_path}/${SANTIZED_MODEL_SAVE_LABEL} --task ${task}
-            else
-                CUDA_VISIBLE_DEVICES=$gpus python math_metric_llm_eval_general.py --tensor_parallel_size $num_gpus --directory_path ${output_path}/${SANTIZED_MODEL_SAVE_LABEL} --task ${task}
-            fi
-        done
-    done
-    python lora_conversion.py --base_model_path $model --lora_model_path $lora_path --delete
-done
-```
-
-We note that we use the `gpqa_diamond_better_prompt` task — our modified version where we adjust the prompt slightly to better ensure that the model outputs answers in the desired format.
-
-#### 2. Coding Benchmarks
+#### Coding Benchmarks
 
 We adapted [EvalPlus](https://github.com/evalplus/evalplus) for **HumanEval** and **MBPP**.
 
@@ -251,3 +189,4 @@ If you find this work useful, please cite:
   journal={arXiv preprint arXiv:2507.17075},
   year={2025}
 }
+```

@@ -203,7 +203,6 @@ def parse_args():
     parser.add_argument("--local_rank", type=int, default=-1) 
     parser.add_argument("--mode", type=str)
     parser.add_argument("--epochs", type=int)
-    parser.add_argument("--save_strategy", type=str) 
     parser.add_argument("--model_name", type=str)
     parser.add_argument("--dataset_name", type=str, default="TianshengHuang/DirectRefusal")
     parser.add_argument("--per_device_bs", type=int)
@@ -454,7 +453,7 @@ def main():
                 per_device_train_batch_size=args.per_device_bs,
                 gradient_accumulation_steps=1,
                 logging_steps=10,
-                save_strategy=args.save_strategy,
+                save_strategy="no",
                 learning_rate=5e-5,
                 weight_decay=1e-4,
                 lr_scheduler_type="cosine",
@@ -471,7 +470,7 @@ def main():
                 per_device_train_batch_size=args.per_device_bs,
                 gradient_accumulation_steps=1,
                 logging_steps=10,
-                save_strategy=args.save_strategy,
+                save_strategy="no",
                 learning_rate=5e-5,
                 weight_decay=1e-4,
                 lr_scheduler_type="cosine",
@@ -489,7 +488,7 @@ def main():
                 per_device_train_batch_size=args.per_device_bs,
                 gradient_accumulation_steps=1,
                 logging_steps=10,
-                save_strategy=args.save_strategy,
+                save_strategy="no",
                 learning_rate=5e-5,
                 weight_decay=1e-4,
                 lr_scheduler_type="cosine",

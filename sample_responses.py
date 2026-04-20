@@ -4,14 +4,47 @@ from transformers import AutoTokenizer
 from tqdm import tqdm
 import argparse
 import os
-from utils import format_prompt, load_prompts, lora_merge_and_load_vllm
+from utils import (
+    format_prompt,
+    lora_merge_and_load_vllm,
+    load_safety_benchmark_prompts,
+    normalize_safety_benchmark_name,
+    safety_benchmark_metadata_filename,
+    safety_benchmark_response_filename,
+)
 import torch
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", type=str)
     parser.add_argument("--lora_path", type=str, default=None)
-    parser.add_argument("--dataset_name", type=str)
+    parser.add_argument(
+        "--dataset_name",
+        type=str,
+        default="walledai/StrongREJECT",
+        help=(
+            "Safety prompt set: 'walledai/StrongREJECT' or 'strongreject' (direct harmful prompts); "
+            "'harmbench' or 'walledai/HarmBench' (gated Hub dataset — requires `hf auth login` and "
+            "accepting dataset terms). HarmBench configs: standard | contextual | copyright "
+            "(see --harmbench_config)."
+        ),
+    )
+    parser.add_argument(
+        "--harmbench_config",
+        type=str,
+        default="standard",
+        help=(
+            "walledai/HarmBench subset: 'standard' (direct harmful prompts), "
+            "'contextual' (prompt + surrounding context), 'copyright' (copyright-related requests). "
+            "Only used when dataset_name selects HarmBench."
+        ),
+    )
+    parser.add_argument(
+        "--harmbench_split",
+        type=str,
+        default="train",
+        help="Split for walledai/HarmBench (only used when dataset_name is HarmBench; Hub revision uses train).",
+    )
     parser.add_argument("--batch_size", type=int) 
     parser.add_argument("--max_new_tokens", type=int, default=2048) 
     parser.add_argument("--temperature", type=float, default=1.0) 
@@ -24,6 +57,11 @@ def parse_args():
 def main():
     args = parse_args()
 
+    benchmark_slug = normalize_safety_benchmark_name(args.dataset_name)
+    hb_cfg = args.harmbench_config if benchmark_slug == "harmbench" else None
+    responses_file = safety_benchmark_response_filename(benchmark_slug, harmbench_config=hb_cfg)
+    metadata_file = safety_benchmark_metadata_filename(benchmark_slug, harmbench_config=hb_cfg)
+
     if args.lora_path is None:
         print("evaluating a non-lora model")
         if not os.path.exists(args.model_path):
@@ -35,27 +73,25 @@ def main():
             else:
                 model_path_full = os.path.join("./finetuned_models", args.model_path.replace('/', '_'), "base")
                 os.makedirs(model_path_full, exist_ok=True)
-                output_path = os.path.join(model_path_full, "strongreject_responses.json")
-                metadata_path = os.path.join(model_path_full, "strongreject_sampling_params.json")
+                output_path = os.path.join(model_path_full, responses_file)
+                metadata_path = os.path.join(model_path_full, metadata_file)
         else:
-            output_path = os.path.join(args.model_path, "strongreject_responses.json")
-            metadata_path = os.path.join(args.model_path, "strongreject_sampling_params.json")
+            output_path = os.path.join(args.model_path, responses_file)
+            metadata_path = os.path.join(args.model_path, metadata_file)
     else:
         print("evaluating a lora model")
-        output_path = os.path.join(args.lora_path, "strongreject_responses.json")
-        metadata_path = os.path.join(args.lora_path, "strongreject_sampling_params.json")
+        output_path = os.path.join(args.lora_path, responses_file)
+        metadata_path = os.path.join(args.lora_path, metadata_file)
 
 
     print(f"Responses will be saved to {output_path}")
 
-    if args.dataset_name == "walledai/StrongREJECT":
-        prompt_field = "prompt"  
-        split = "train"
-    else:
-        raise NotImplementedError
-    
     # === Load dataset ===
-    all_prompts = load_prompts(args.dataset_name, split, prompt_field)
+    all_prompts = load_safety_benchmark_prompts(
+        benchmark_slug,
+        harmbench_config=args.harmbench_config,
+        harmbench_split=args.harmbench_split,
+    )
 
     # === Load model + tokenizer ===
     if "CUDA_VISIBLE_DEVICES" in os.environ:
@@ -102,11 +138,16 @@ def main():
 
     # === Save sampling parameters to separate JSON ===
     metadata = {
+        "benchmark": benchmark_slug,
+        "dataset_name_arg": args.dataset_name,
         "max_new_tokens": args.max_new_tokens,
         "temperature": args.temperature,
         "top_p": args.top_p,
         "top_k": args.top_k
     }
+    if benchmark_slug == "harmbench":
+        metadata["harmbench_config"] = args.harmbench_config
+        metadata["harmbench_split"] = args.harmbench_split
     with open(metadata_path, "w") as f:
         json.dump(metadata, f, indent=2)
 
